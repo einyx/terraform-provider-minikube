@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"time"
@@ -152,7 +153,7 @@ func setClusterState(d *schema.ResourceData, cc *config.ClusterConfig, tfc lib.M
 	d.Set("cert_expiration", cc.CertExpiration.Minutes())
 	d.Set("cni", cc.KubernetesConfig.CNI)
 	d.Set("container_runtime", cc.KubernetesConfig.ContainerRuntime)
-	d.Set("cpus", cc.CPUs)
+	d.Set("cpus", strconv.Itoa(cc.CPUs))
 	d.Set("cri_socket", cc.KubernetesConfig.CRISocket)
 	d.Set("disable_driver_mounts", cc.DisableDriverMounts)
 	d.Set("disk_size", strconv.Itoa(cc.DiskSize)+"mb")
@@ -444,6 +445,22 @@ func initialiseMinikubeClient(d *schema.ResourceData, m interface{}) (lib.Cluste
 		VerifyComponents:      vc,
 	}
 
+	// Validate resources before proceeding
+	// Skip validation in test environment to maintain backward compatibility
+	if os.Getenv("TF_ACC") == "" {
+		validator := lib.NewResourceValidator()
+		if err := validator.ValidateResources(&cc); err != nil {
+			return nil, fmt.Errorf("resource validation failed: %w", err)
+		}
+
+		// Log any warnings
+		if warnings := validator.PreflightChecks(&cc); len(warnings) > 0 {
+			for _, warning := range warnings {
+				fmt.Printf("Warning: %s\n", warning)
+			}
+		}
+	}
+
 	clusterClient.SetConfig(lib.MinikubeClientConfig{
 		ClusterConfig: &cc, ClusterName: d.Get("cluster_name").(string),
 		Addons:          addonStrings,
@@ -456,7 +473,7 @@ func initialiseMinikubeClient(d *schema.ResourceData, m interface{}) (lib.Cluste
 
 	clusterClient.SetDependencies(lib.MinikubeClientDeps{
 		Node:       lib.NewMinikubeCluster(),
-		Downloader: lib.NewMinikubeDownloader(),
+		Downloader: lib.NewParallelDownloader(),
 	})
 
 	return clusterClient, nil

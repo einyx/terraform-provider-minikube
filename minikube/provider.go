@@ -41,9 +41,11 @@ func providerConfigure(ctx context.Context, d *schema.ResourceData) (interface{}
 	mutex := &sync.Mutex{}
 	k8sVersion := d.Get("kubernetes_version").(string)
 	minikubeClientFactory := func() (lib.ClusterClient, error) {
-		return &lib.MinikubeClient{
+		client := &lib.MinikubeClient{
 			TfCreationLock: mutex,
-			K8sVersion:     k8sVersion}, nil
+			K8sVersion:     k8sVersion}
+		// Wrap with caching layer for better performance
+		return lib.NewCachedClusterClient(client), nil
 	}
 	return minikubeClientFactory, diags
 }

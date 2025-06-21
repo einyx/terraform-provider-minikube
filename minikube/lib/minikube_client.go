@@ -212,6 +212,8 @@ func (e *MinikubeClient) addHANodes(cc *config.ClusterConfig) (*config.ClusterCo
 
 	var err error
 	if e.ha {
+		// Note: Control plane nodes must be added sequentially to maintain cluster state consistency
+		// Each control plane node modifies the cluster config which is needed for the next node
 		for i := 0; i < MinExtraHANodes; i++ {
 			cc, err = e.nRunner.AddControlPlaneNode(cc,
 				cc.KubernetesConfig.KubernetesVersion,
@@ -231,13 +233,71 @@ func (e *MinikubeClient) addHANodes(cc *config.ClusterConfig) (*config.ClusterCo
 
 func (e *MinikubeClient) provisionNodes(starter node.Starter) error {
 	// Remaining nodes
-	for i := 0; i < e.nodes-1; i++ { // excluding the initial node
-		err := e.nRunner.AddWorkerNode(e.clusterConfig,
-			starter.Cfg.KubernetesConfig.KubernetesVersion,
-			starter.Cfg.APIServerPort,
-			starter.Cfg.KubernetesConfig.ContainerRuntime)
-		if err != nil {
-			return err
+	nodeCount := e.nodes - 1 // excluding the initial node
+	if nodeCount <= 0 {
+		return nil
+	}
+
+	// For small clusters (3 or fewer worker nodes), use sequential provisioning
+	// For larger clusters, use parallel provisioning with a worker pool
+	if nodeCount <= 3 {
+		for i := 0; i < nodeCount; i++ {
+			err := e.nRunner.AddWorkerNode(e.clusterConfig,
+				starter.Cfg.KubernetesConfig.KubernetesVersion,
+				starter.Cfg.APIServerPort,
+				starter.Cfg.KubernetesConfig.ContainerRuntime)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Parallel provisioning for larger clusters
+	type result struct {
+		index int
+		err   error
+	}
+
+	// Use a worker pool with max 4 concurrent provisioning operations
+	maxWorkers := 4
+	if nodeCount < maxWorkers {
+		maxWorkers = nodeCount
+	}
+
+	jobs := make(chan int, nodeCount)
+	results := make(chan result, nodeCount)
+
+	// Start workers
+	var wg sync.WaitGroup
+	for w := 0; w < maxWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				err := e.nRunner.AddWorkerNode(e.clusterConfig,
+					starter.Cfg.KubernetesConfig.KubernetesVersion,
+					starter.Cfg.APIServerPort,
+					starter.Cfg.KubernetesConfig.ContainerRuntime)
+				results <- result{index: i, err: err}
+			}
+		}()
+	}
+
+	// Queue jobs
+	for i := 0; i < nodeCount; i++ {
+		jobs <- i
+	}
+	close(jobs)
+
+	// Wait for all workers to finish
+	wg.Wait()
+	close(results)
+
+	// Check for errors
+	for r := range results {
+		if r.err != nil {
+			return fmt.Errorf("failed to provision worker node %d: %w", r.index, r.err)
 		}
 	}
 
@@ -298,11 +358,74 @@ func diff(addonsA, addonsB []string) []string {
 }
 
 func (e *MinikubeClient) setAddons(addons []string, val bool) error {
-	for _, addon := range addons {
-		err := e.nRunner.SetAddon(e.clusterName, addon, strconv.FormatBool(val))
-		if err != nil {
-			return err
+	if len(addons) == 0 {
+		return nil
+	}
+
+	// For small number of addons, use sequential approach
+	if len(addons) <= 2 {
+		for _, addon := range addons {
+			err := e.nRunner.SetAddon(e.clusterName, addon, strconv.FormatBool(val))
+			if err != nil {
+				return err
+			}
 		}
+		return nil
+	}
+
+	// For larger number of addons, use concurrent approach with limited parallelism
+	// to avoid overwhelming the minikube API
+	type result struct {
+		addon string
+		err   error
+	}
+
+	// Limit concurrency to 3 to avoid overwhelming minikube
+	maxWorkers := 3
+	if len(addons) < maxWorkers {
+		maxWorkers = len(addons)
+	}
+
+	jobs := make(chan string, len(addons))
+	results := make(chan result, len(addons))
+
+	// Start workers
+	var wg sync.WaitGroup
+	for w := 0; w < maxWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for addon := range jobs {
+				err := e.nRunner.SetAddon(e.clusterName, addon, strconv.FormatBool(val))
+				results <- result{addon: addon, err: err}
+			}
+		}()
+	}
+
+	// Queue jobs
+	for _, addon := range addons {
+		jobs <- addon
+	}
+	close(jobs)
+
+	// Wait for all workers to finish
+	wg.Wait()
+	close(results)
+
+	// Collect errors
+	var firstErr error
+	failedAddons := []string{}
+	for r := range results {
+		if r.err != nil {
+			failedAddons = append(failedAddons, r.addon)
+			if firstErr == nil {
+				firstErr = r.err
+			}
+		}
+	}
+
+	if firstErr != nil {
+		return fmt.Errorf("failed to set addons %v: %w", failedAddons, firstErr)
 	}
 
 	return nil
@@ -328,6 +451,15 @@ func (e *MinikubeClient) GetK8sVersion() string {
 
 // downloadIsos retrieve all prerequisite images prior to provisioning
 func (e *MinikubeClient) downloadIsos() (string, error) {
+	// Check if downloader supports parallel downloads
+	if pd, ok := e.dLoader.(*ParallelDownloader); ok {
+		return pd.DownloadAll(e.isoUrls, true,
+			e.clusterConfig.KubernetesConfig.KubernetesVersion,
+			e.clusterConfig.KubernetesConfig.ContainerRuntime,
+			e.clusterConfig.Driver)
+	}
+
+	// Fallback to sequential downloads
 	url, err := e.dLoader.ISO(e.isoUrls, true)
 	if err != nil {
 		return "", err

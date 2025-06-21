@@ -64,7 +64,7 @@ var schemaOverrides map[string]SchemaOverride = map[string]SchemaOverride{
 		ValidateDiagFunc: "state_utils.MemoryValidator()",
 	},
 	"disk_size": {
-		Default:          "20000mb",
+		Default:          "20480mb",
 		Description:      "Disk size allocated to the minikube VM (format: <number>[<unit>(case-insensitive)], where unit = b, k, kb, m, mb, g or gb)",
 		Type:             String,
 		StateFunc:        "state_utils.ResourceSizeConverter()",

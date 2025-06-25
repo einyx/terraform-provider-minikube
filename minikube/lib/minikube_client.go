@@ -56,6 +56,13 @@ type MinikubeClient struct {
 	TfCreationLock *sync.Mutex
 	K8sVersion     string
 
+	// Docker remote connection settings
+	DockerContext   string
+	DockerHost      string
+	DockerCertPath  string
+	DockerTLSVerify bool
+	DockerPlatform  string
+
 	nRunner Cluster
 	dLoader Downloader
 }
@@ -146,6 +153,9 @@ func (e *MinikubeClient) Start() (*kubeconfig.Settings, error) {
 		e.TfCreationLock.Lock()
 		defer e.TfCreationLock.Unlock()
 	}
+
+	// Set Docker environment variables if provided
+	e.setDockerEnvironment()
 
 	viper.Set(cmdcfg.Bootstrapper, "kubeadm")
 	viper.Set(config.ProfileName, e.clusterName)
@@ -313,6 +323,9 @@ func (e *MinikubeClient) ApplyAddons(addons []string) error {
 		defer e.TfCreationLock.Unlock()
 	}
 
+	// Set Docker environment variables if provided
+	e.setDockerEnvironment()
+
 	viper.Set(config.ProfileName, e.clusterName)
 
 	addonsToDelete := diff(e.addons, addons)
@@ -333,6 +346,7 @@ func (e *MinikubeClient) ApplyAddons(addons []string) error {
 }
 
 func (e *MinikubeClient) GetAddons() []string {
+	// Note: e.GetClusterConfig() already sets Docker environment
 	addons := make([]string, 0)
 	for addon, enabled := range e.GetClusterConfig().Addons {
 		if enabled {
@@ -433,6 +447,9 @@ func (e *MinikubeClient) setAddons(addons []string, val bool) error {
 
 // Delete deletes the given cluster associated with the cluster config
 func (e *MinikubeClient) Delete() error {
+	// Set Docker environment variables if provided
+	e.setDockerEnvironment()
+	
 	_, err := e.nRunner.Delete(e.clusterConfig, e.clusterName)
 	if err != nil {
 		return err
@@ -442,11 +459,46 @@ func (e *MinikubeClient) Delete() error {
 
 // GetClusterConfig retrieves the latest cluster config from minikube
 func (e *MinikubeClient) GetClusterConfig() *config.ClusterConfig {
+	// Set Docker environment variables if provided
+	e.setDockerEnvironment()
+	
 	return e.nRunner.Get(e.clusterName)
 }
 
 func (e *MinikubeClient) GetK8sVersion() string {
 	return e.K8sVersion
+}
+
+// setDockerEnvironment sets Docker environment variables if configured
+func (e *MinikubeClient) setDockerEnvironment() {
+	// Set Docker context if provided
+	if e.DockerContext != "" {
+		os.Setenv("DOCKER_CONTEXT", e.DockerContext)
+	}
+	
+	// Set Docker host if provided
+	if e.DockerHost != "" {
+		os.Setenv("DOCKER_HOST", e.DockerHost)
+	}
+	
+	// Set Docker platform if provided or if using remote Docker
+	if e.DockerPlatform != "" {
+		os.Setenv("DOCKER_DEFAULT_PLATFORM", e.DockerPlatform)
+	} else if e.DockerHost != "" || e.DockerContext != "" {
+		// When using remote Docker without explicit platform, default to linux/amd64
+		// This prevents architecture mismatch issues with multi-arch images
+		os.Setenv("DOCKER_DEFAULT_PLATFORM", "linux/amd64")
+	}
+	
+	// Set Docker cert path if provided
+	if e.DockerCertPath != "" {
+		os.Setenv("DOCKER_CERT_PATH", e.DockerCertPath)
+	}
+	
+	// Set Docker TLS verify if enabled
+	if e.DockerTLSVerify {
+		os.Setenv("DOCKER_TLS_VERIFY", "1")
+	}
 }
 
 // downloadIsos retrieve all prerequisite images prior to provisioning
